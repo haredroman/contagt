@@ -1,0 +1,444 @@
+// This is your Prisma schema file for ContaGT SaaS
+// Guatemala accounting platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// AUTH & MULTI-TENANCY
+// ============================================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  role          UserRole  @default(CONTADOR)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  empresas      EmpresaUser[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  CONTADOR
+  AUDITOR
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================
+// MULTI-EMPRESA
+// ============================================
+
+model Empresa {
+  id               String      @id @default(cuid())
+  nombre           String
+  nit              String      @unique
+  nombreComercial  String?
+  direccion        String?
+  municipio        String?
+  departamento     String?
+  telefono         String?
+  email            String?
+  regimenFiscal    RegimenFiscal @default(GENERAL)
+  esAgenteRetenedor Boolean    @default(false)
+  activa           Boolean     @default(true)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  // Relations
+  usuarios         EmpresaUser[]
+  documentosFEL   FelDocumento[]
+  asientos         JournalEntry[]
+  cuentas          AccountChart[]
+  reglas           ClassificationRule[]
+  periodos         Periodo[]
+
+  @@map("empresas")
+}
+
+enum RegimenFiscal {
+  GENERAL
+  PEQUENO_CONTRIBUYENTE
+  EXENTO
+}
+
+model EmpresaUser {
+  id        String    @id @default(cuid())
+  userId    String
+  empresaId String
+  rol       EmpresaRol @default(CONTADOR)
+  activo    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  empresa Empresa @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, empresaId])
+  @@map("empresa_users")
+}
+
+enum EmpresaRol {
+  DUENO
+  CONTADOR
+  AUDITOR
+}
+
+// ============================================
+// DOCUMENTOS FEL (Facturas SAT)
+// ============================================
+
+model FelDocumento {
+  id              String          @id @default(cuid())
+  empresaId       String
+  uuid            String          // UUID FEL (Número de autorización SAT)
+  serie           String
+  numero          String
+  tipoDocumento   TipoDocumentoFEL
+  fecha           DateTime
+  hora            String?
+  moneda          String          @default("GTQ")
+
+  // Emisor
+  emisorNit       String
+  emisorNombre    String
+  emisorDireccion String?
+  emisorMunicipio String?
+  emisorDepartamento String?
+  emisorAfiliacionIVA String      @default("GEN")
+
+  // Receptor
+  receptorNit     String          @default("CF")
+  receptorNombre  String          @default("Consumidor Final")
+
+  // Totales
+  granTotal       Float           @default(0)
+  baseGravable    Float           @default(0)
+  totalIVA        Float           @default(0)
+  ivaTasa         Float           @default(0.12)
+
+  // Retenciones
+  isrRetencion    Float           @default(0)
+  ivaRetencion    Float           @default(0)
+  aplicaRetencionISR Boolean      @default(false)
+  aplicaRetencionIVA Boolean      @default(false)
+
+  // Clasificación contable (resultado del motor de reglas)
+  cuentaContableCode String?
+  cuentaContableName String?
+  taxTag          String?
+  clasificacionConfianza Int?     // 0-100
+  clasificacionRegla String?
+
+  // Estado
+  estado          EstadoDocumento @default(PENDIENTE)
+  direccion       TipoMovimiento
+
+  // Certificación
+  certificadorNit     String?
+  certificadorNombre  String?
+  fechaCertificacion  DateTime?
+
+  // Metadata
+  xmlOriginal     String?
+  notas           String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Relations
+  empresa         Empresa         @relation(fields: [empresaId], references: [id])
+  asientos        JournalEntry[]
+  items           FelDocumentoItem[]
+
+  @@unique([empresaId, uuid])
+  @@index([empresaId, fecha])
+  @@index([empresaId, emisorNit])
+  @@index([empresaId, tipoDocumento, estado])
+  @@map("fel_documentos")
+}
+
+enum TipoDocumentoFEL {
+  FACT  // Factura General
+  FCAM  // Factura Cambiaria
+  FPEQ  // Factura Pequeño Contribuyente
+  FESP  // Factura Especial
+  NABN  // Nota de Abono
+  RDON  // Recibo por Donación
+  RECI  // Recibo
+  NDEB  // Nota de Débito
+  NCRE  // Nota de Crédito
+}
+
+enum EstadoDocumento {
+  PENDIENTE
+  PROCESADO
+  CONTABILIZADO
+  ANULADO
+  ERROR
+  DUPLICADO
+}
+
+enum TipoMovimiento {
+  COMPRA
+  VENTA
+}
+
+model FelDocumentoItem {
+  id              String       @id @default(cuid())
+  documentoId     String
+  linea           Int
+  descripcion     String
+  cantidad        Float        @default(0)
+  unidadMedida    String?
+  precioUnitario  Float        @default(0)
+  descuento       Float        @default(0)
+  precio          Float        @default(0)
+  montoIVA        Float        @default(0)
+  total           Float        @default(0)
+
+  documento       FelDocumento @relation(fields: [documentoId], references: [id], onDelete: Cascade)
+
+  @@map("fel_documento_items")
+}
+
+// ============================================
+// CONTABILIDAD — PARTIDA DOBLE
+// ============================================
+
+model Periodo {
+  id          String   @id @default(cuid())
+  empresaId   String
+  año         Int
+  mes         Int      // 1-12
+  estado      PeriodoEstado @default(ABIERTO)
+  cerradoEn   DateTime?
+  cerradoPor  String?
+  createdAt   DateTime @default(now())
+
+  empresa     Empresa  @relation(fields: [empresaId], references: [id])
+  asientos    JournalEntry[]
+
+  @@unique([empresaId, año, mes])
+  @@map("periodos")
+}
+
+enum PeriodoEstado {
+  ABIERTO
+  CERRADO
+}
+
+model AccountChart {
+  id          String   @id @default(cuid())
+  empresaId   String
+  code        String   // e.g. "1101", "4101"
+  name        String
+  type        AccountType
+  niifLevel   String?
+  isTaxAccount Boolean @default(false)
+  defaultTaxTag String?
+  activa      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  empresa     Empresa  @relation(fields: [empresaId], references: [id])
+  items       JournalItem[]
+
+  @@unique([empresaId, code])
+  @@map("account_chart")
+}
+
+enum AccountType {
+  ACTIVO
+  PASIVO
+  CAPITAL
+  INGRESO
+  GASTO
+}
+
+model JournalEntry {
+  id          String       @id @default(cuid())
+  empresaId   String
+  periodoId   String?
+  felId       String?      // Source FEL document (if any)
+  fecha       DateTime
+  referencia  String?      // FEL UUID, bank reference, etc.
+  descripcion String?
+  tipo        EntryType    @default(DIARIO)
+  estado      EntryStatus  @default(BORRADOR)
+  source      EntrySource  @default(MANUAL)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  createdBy   String?
+
+  empresa     Empresa      @relation(fields: [empresaId], references: [id])
+  periodo     Periodo?     @relation(fields: [periodoId], references: [id])
+  documento   FelDocumento? @relation(fields: [felId], references: [id])
+  items       JournalItem[]
+  auditLogs   AuditLog[]
+
+  @@index([empresaId, fecha])
+  @@index([empresaId, estado])
+  @@map("journal_entries")
+}
+
+enum EntryType {
+  DIARIO
+  COMPRAS
+  VENTAS
+  BANCOS
+  APERTURA
+  CIERRE
+}
+
+enum EntryStatus {
+  BORRADOR
+  POSTEADO
+  ANULADO
+}
+
+enum EntrySource {
+  FEL_XML
+  CSV_BANCO
+  MANUAL
+  SISTEMA
+}
+
+model JournalItem {
+  id          String       @id @default(cuid())
+  entryId     String
+  accountId   String?
+  accountCode String       // Denormalized for performance
+  accountName String
+  debe        Float        @default(0)
+  haber       Float        @default(0)
+  descripcion String?
+  taxTags     String       @default("")
+  felUuid     String?
+
+  entry       JournalEntry  @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  account     AccountChart? @relation(fields: [accountId], references: [id])
+
+  @@index([entryId])
+  @@index([accountCode])
+  @@map("journal_items")
+}
+
+// ============================================
+// MOTOR DE REGLAS (Personalizables por empresa)
+// ============================================
+
+model ClassificationRule {
+  id              String         @id @default(cuid())
+  empresaId       String?        // null = global rule
+  nombre          String
+  priority        RulePriority   @default(KEYWORD)
+  nitEmisor       String?
+  nombreContiene  String?
+  keywords        String?        // JSON string array
+  montoMin        Float?
+  montoMax        Float?
+  accountCode     String
+  accountName     String
+  taxTag          String
+  notas           String?
+  activo          Boolean        @default(true)
+  orden           Int            @default(100)
+  createdAt       DateTime       @default(now())
+
+  empresa         Empresa?       @relation(fields: [empresaId], references: [id])
+
+  @@map("classification_rules")
+}
+
+enum RulePriority {
+  NIT_EXACTO
+  NOMBRE_EXACTO
+  KEYWORD
+  DEFAULT
+}
+
+// ============================================
+// AUDIT LOG — Inmutabilidad (ningún registro se borra)
+// ============================================
+
+model AuditLog {
+  id          String    @id @default(cuid())
+  userId      String?
+  entryId     String?
+  entityType  String    // "FelDocumento", "JournalEntry", etc.
+  entityId    String
+  action      AuditAction
+  beforeState String?
+  afterState  String?
+  ip          String?
+  userAgent   String?
+  timestamp   DateTime  @default(now())
+
+  user        User?        @relation(fields: [userId], references: [id])
+  entry       JournalEntry? @relation(fields: [entryId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  REVERSE
+  CLOSE
+  EXPORT
+  LOGIN
+}
