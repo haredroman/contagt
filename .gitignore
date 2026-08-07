@@ -32,9 +32,18 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
+
+# prisma sqlite local db
+/prisma/dev.db
+/prisma/dev.db-journal
+/prisma/migrations/dev/
+
+# firebase cache (residual from previous project)
+/.firebase/
 
 # typescript
 *.tsbuildinfo
